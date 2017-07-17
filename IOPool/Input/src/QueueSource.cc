@@ -2,8 +2,7 @@
 ----------------------------------------------------------------------*/
 #include "QueueSource.h"
 #include "InputFile.h"
-#include "RootPrimaryFileSequence.h"
-#include "RootSecondaryFileSequence.h"
+#include "RootInputFileQueue.h"
 #include "RunHelper.h"
 #include "DataFormats/Common/interface/ThinnedAssociation.h"
 #include "DataFormats/Provenance/interface/BranchDescription.h"
@@ -48,8 +47,6 @@ namespace edm {
     labelRawDataLikeMC_(pset.getUntrackedParameter<bool>("labelRawDataLikeMC")),
     runHelper_(makeRunHelper(pset)),
     resourceSharedWithDelayedReaderPtr_(),
-    // Note: Per PoolSource docs, primaryFileSequence_ needs to be initialized last, because they use data members
-    // initialized previously in their own initialization.
     primaryFileSequence_(new RootInputFileQueue(pset, *this, catalog_))
   {
     auto resources = SharedResourcesRegistry::instance()->createAcquirerForSourceDelayedReader();
@@ -128,12 +125,6 @@ namespace edm {
     return std::make_pair(resourceSharedWithDelayedReaderPtr_.get(), mutexSharedWithDelayedReader_.get());
   }
 
-  // Rewind to before the first event that was read.
-  void
-  QueueSource::rewind_() {
-    primaryFileSequence_->rewind_();
-  }
-
   // Advance "offset" events.  Offset can be positive or negative (or zero).
   void
   QueueSource::skip(int offset) {
@@ -169,7 +160,7 @@ namespace edm {
         ->setComment("If True: replace module label for raw data to match MC. Also use 'LHC' as process.");
     ProductSelectorRules::fillDescription(desc, "inputCommands");
     InputSource::fillDescription(desc);
-    RootPrimaryFileSequence::fillDescription(desc);
+    RootInputFileQueue::fillDescription(desc);
     RunHelperBase::fillDescription(desc);
 
     descriptions.add("source", desc);
@@ -180,13 +171,4 @@ namespace edm {
     return false;
   }
 
-  ProcessingController::ForwardState
-  QueueSource::forwardState_() const {
-    return primaryFileSequence_->forwardState();
-  }
-
-  ProcessingController::ReverseState
-  QueueSource::reverseState_() const {
-    return primaryFileSequence_->reverseState();
-  }
 }

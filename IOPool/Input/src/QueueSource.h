@@ -26,8 +26,7 @@ namespace edm {
 
   class ConfigurationDescriptions;
   class FileCatalogItem;
-  class RootPrimaryFileSequence;
-  class RootSecondaryFileSequence;
+  class RootInputFileQueue;
   class RunHelperBase;
 
   class QueueSource : public InputSource {
@@ -62,11 +61,8 @@ namespace edm {
     virtual bool readIt(EventID const& id, EventPrincipal& eventPrincipal, StreamContext& streamContext) override;
     virtual void skip(int offset) override;
     virtual bool goToEvent_(EventID const& eventID) override;
-    virtual void rewind_() override;
     virtual void preForkReleaseResources() override;
     virtual bool randomAccess_() const override;
-    virtual ProcessingController::ForwardState forwardState_() const override;
-    virtual ProcessingController::ReverseState reverseState_() const override;
 
     std::pair<SharedResourcesAcquirer*,std::recursive_mutex*> resourceSharedWithDelayedReader_() override;
     
