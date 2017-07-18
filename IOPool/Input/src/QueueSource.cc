@@ -1,5 +1,6 @@
 /*----------------------------------------------------------------------
 ----------------------------------------------------------------------*/
+#include "AMQPQueue.h"
 #include "QueueSource.h"
 #include "InputFile.h"
 #include "RootFile.h"
@@ -41,8 +42,6 @@ namespace edm {
   QueueSource::QueueSource(ParameterSet const& pset, InputSourceDescription const& desc) :
     InputSource(pset, desc),
     rootServiceChecker_(),
-    catalog_(pset.getUntrackedParameter<std::vector<std::string> >("fileNames"),
-      pset.getUntrackedParameter<std::string>("overrideCatalog", std::string())),
     branchIDsToReplace_(),
     nStreams_(desc.allocations_->numberOfStreams()),
     skipBadFiles_(pset.getUntrackedParameter<bool>("skipBadFiles")),
@@ -53,12 +52,13 @@ namespace edm {
     labelRawDataLikeMC_(pset.getUntrackedParameter<bool>("labelRawDataLikeMC")),
     runHelper_(makeRunHelper(pset)),
     resourceSharedWithDelayedReaderPtr_(),
-    //fileIter_(fileCatalogItems().begin()),
     eventSkipperByID_(EventSkipperByID::create(pset).release()),
     duplicateChecker_(new DuplicateChecker(pset)),
     initialNumberOfEventsToSkip_(pset.getUntrackedParameter<unsigned int>("skipEvents")),
     noEventSort_(pset.getUntrackedParameter<bool>("noEventSort")),
-    treeCacheSize_(noEventSort_ ? pset.getUntrackedParameter<unsigned int>("cacheSize") : 0U)
+    treeCacheSize_(noEventSort_ ? pset.getUntrackedParameter<unsigned int>("cacheSize") : 0U),
+    overrideCatalogLocation_(pset.getUntrackedParameter<std::string>("overrideCatalog", std::string())),
+    fileQueue_(new AMQPQueue(pset))
   {
     auto resources = SharedResourcesRegistry::instance()->createAcquirerForSourceDelayedReader();
     resourceSharedWithDelayedReaderPtr_ = std::make_unique<SharedResourcesAcquirer>(std::move(resources.first));
@@ -243,6 +243,39 @@ namespace edm {
   void
   QueueSource::setIndexIntoFile(size_t index) {
    indexesIntoFiles_[index] = rootFile()->indexIntoFileSharedPtr();
+  }
+
+  bool QueueSource::nextFile() {
+    if (!noMoreFiles()) {
+      std::string nextCatalogItem;
+      if (fileQueue_->next(nextCatalogItem)) {
+        gotLastFile = true;
+      } else {
+        std::vector<std::string> filenames = {nextCatalogItem};
+        InputFileCatalog catalog(filenames, overrideCatalogLocation_);
+        fileCatalogItem_ = catalog.fileCatalogItems()[0];
+      }
+    }
+    if (noMoreFiles()) {
+      return false;
+    }
+
+
+    initFile(skipBadFiles());
+
+    if(rootFile()) {
+      // make sure the new product registry is compatible with the main one
+      std::string mergeInfo = productRegistryUpdate().merge(*rootFile()->productRegistry(),
+                                                                   fileName(),
+                                                                   BranchDescription::Permissive);
+      if(!mergeInfo.empty()) {
+        throw Exception(errors::MismatchedInputFiles,"RootPrimaryFileSequence::nextFile()") << mergeInfo;
+      }
+    }
+
+    filesProcessed++;
+
+    return true;
   }
 
   void

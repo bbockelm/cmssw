@@ -32,6 +32,7 @@ namespace edm {
   class InputFile;
   class RootFile;
   class RunHelperBase;
+  class FileQueue;
 
   class QueueSource : public InputSource {
   public:
@@ -55,9 +56,9 @@ namespace edm {
   private:
     typedef std::shared_ptr<RootFile> RootFileSharedPtr;
 
-    std::string const& fileName() const {return fileIter_.fileName();}
-    std::string const& logicalFileName() const {return fileIter_.logicalFileName();}
-    std::string const& fallbackFileName() const {return fileIter_.fallbackFileName();}
+    std::string const& fileName() const {return fileCatalogItem_.fileName();}
+    std::string const& logicalFileName() const {return fileCatalogItem_.logicalFileName();}
+    std::string const& fallbackFileName() const {return fileCatalogItem_.fallbackFileName();}
     std::string const& lfn() const {return lfn_;}
     size_t lfnHash() const {return lfnHash_;}
     bool usedFallback() const {return usedFallback_;}
@@ -88,7 +89,8 @@ namespace edm {
     bool skipToItem(RunNumber_t run, LuminosityBlockNumber_t lumi, EventNumber_t event);
     std::vector<std::shared_ptr<IndexIntoFile> > const& indexesIntoFiles() const {return indexesIntoFiles_;}
     void setIndexIntoFile(size_t index);
-    virtual RootFileSharedPtr makeRootFile(std::shared_ptr<InputFile> filePtr);
+    RootFileSharedPtr makeRootFile(std::shared_ptr<InputFile> filePtr);
+    bool nextFile();
 
     std::shared_ptr<EventSkipperByID const> eventSkipperByID() const {return get_underlying_safe(eventSkipperByID_);}
     std::shared_ptr<EventSkipperByID>& eventSkipperByID() {return get_underlying_safe(eventSkipperByID_);}
@@ -100,7 +102,6 @@ namespace edm {
     std::pair<SharedResourcesAcquirer*,std::recursive_mutex*> resourceSharedWithDelayedReader_() override;
 
     RootServiceChecker rootServiceChecker_;
-    InputFileCatalog catalog_;
     std::array<std::vector<BranchID>, NumBranchTypes>  branchIDsToReplace_;
 
     unsigned int nStreams_;
@@ -122,14 +123,17 @@ namespace edm {
     bool noEventSort_;
     unsigned int treeCacheSize_;
 
+    std::string overrideCatalogLocation_{};
     std::string lfn_{"unknown"};
     size_t lfnHash_{0U};
     bool usedFallback_{false};
-    FileCatalogItem fileIter_;
+    FileCatalogItem fileCatalogItem_;
     bool gotLastFile {false};
     size_t filesProcessed {0};
     edm::propagate_const<RootFileSharedPtr> rootFile_;
     std::vector<std::shared_ptr<IndexIntoFile> > indexesIntoFiles_;
+
+    std::unique_ptr<FileQueue> fileQueue_;
   }; // class QueueSource
 }
 #endif
