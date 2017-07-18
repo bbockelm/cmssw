@@ -42,7 +42,6 @@ namespace edm {
     using InputSource::productRegistryUpdate;
 
     // const accessors
-    bool skipBadFiles() const {return skipBadFiles_;}
     bool dropDescendants() const {return dropDescendants_;}
     bool bypassVersionCheck() const {return bypassVersionCheck_;}
     bool labelRawDataLikeMC() const {return labelRawDataLikeMC_;}
@@ -85,7 +84,7 @@ namespace edm {
     virtual bool randomAccess_() const override;
 
 
-    void initFile(bool skipBadFiles);
+    void initFile();
     bool skipToItem(RunNumber_t run, LuminosityBlockNumber_t lumi, EventNumber_t event);
     std::vector<std::shared_ptr<IndexIntoFile> > const& indexesIntoFiles() const {return indexesIntoFiles_;}
     void setIndexIntoFile(size_t index);

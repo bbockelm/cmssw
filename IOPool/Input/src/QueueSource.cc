@@ -1,5 +1,7 @@
 /*----------------------------------------------------------------------
 ----------------------------------------------------------------------*/
+#include <iostream>
+
 #include "AMQPQueue.h"
 #include "QueueSource.h"
 #include "InputFile.h"
@@ -63,6 +65,26 @@ namespace edm {
     auto resources = SharedResourcesRegistry::instance()->createAcquirerForSourceDelayedReader();
     resourceSharedWithDelayedReaderPtr_ = std::make_unique<SharedResourcesAcquirer>(std::move(resources.first));
     mutexSharedWithDelayedReader_ = resources.second;
+
+    // Open first file.
+    std::string nextCatalogItem;
+    while (!(gotLastFile = !fileQueue_->next(nextCatalogItem))) {
+      indexesIntoFiles_.emplace_back(nullptr);
+      std::vector<std::string> filenames = {nextCatalogItem};
+      InputFileCatalog catalog(filenames, overrideCatalogLocation_);
+      fileCatalogItem_ = catalog.fileCatalogItems()[0];
+      initFile();
+      filesProcessed++;
+      if (rootFile()) {
+        break;
+      }
+    }
+    if (!gotLastFile) {
+      productRegistryUpdate().updateFromInput(rootFile()->productRegistry()->productList());
+      if (initialNumberOfEventsToSkip_ != 0) {
+        skipEvents(initialNumberOfEventsToSkip_);
+      }
+    }
   }
 
   QueueSource::~QueueSource() {}
@@ -75,8 +97,13 @@ namespace edm {
 
   std::unique_ptr<FileBlock>
   QueueSource::readFile_() {
-    std::unique_ptr<FileBlock> fb = readFile_();
-    return fb;
+    // TODO: it's possible that the nextFile call discovers we have
+    // no files remaining.
+    nextFile();
+    if(!rootFile()) {
+      return std::make_unique<FileBlock>();
+    }
+    return rootFile()->createFileBlock();
   }
 
   void QueueSource::closeFile_() {
@@ -164,8 +191,6 @@ namespace edm {
 
     std::vector<std::string> defaultStrings;
     desc.setComment("Reads EDM/ROOT files determined by a remote queue.");
-    desc.addUntracked<std::vector<std::string> >("contact")
-        ->setComment("Contact URI for remote queue.");
     desc.addUntracked<std::string>("overrideCatalog", std::string());
     desc.addUntracked<bool>("skipBadFiles", false)
         ->setComment("True:  Ignore any missing or unopenable input file.\n"
@@ -196,6 +221,7 @@ namespace edm {
     ProductSelectorRules::fillDescription(desc, "inputCommands");
     InputSource::fillDescription(desc);
     RunHelperBase::fillDescription(desc);
+    AMQPQueue::fillDescription(desc);
 
     descriptions.add("source", desc);
   }
@@ -214,7 +240,7 @@ namespace edm {
           logicalFileName(),
           filePtr,
           eventSkipperByID(),
-          false, // initialNumberOfEventsToSkip_ != 0
+          initialNumberOfEventsToSkip_ != 0,
           remainingEvents(),
           remainingLuminosityBlocks(),
           nStreams(),
@@ -237,7 +263,7 @@ namespace edm {
           bypassVersionCheck(),
           labelRawDataLikeMC(),
           false, // usingGoToEvent_
-          true); // enablePrefetching_
+          false); // enablePrefetching_
   }
 
   void
@@ -248,12 +274,13 @@ namespace edm {
   bool QueueSource::nextFile() {
     if (!noMoreFiles()) {
       std::string nextCatalogItem;
-      if (fileQueue_->next(nextCatalogItem)) {
+      if (!fileQueue_->next(nextCatalogItem)) {
         gotLastFile = true;
       } else {
         std::vector<std::string> filenames = {nextCatalogItem};
         InputFileCatalog catalog(filenames, overrideCatalogLocation_);
         fileCatalogItem_ = catalog.fileCatalogItems()[0];
+        indexesIntoFiles_.emplace_back(nullptr);
       }
     }
     if (noMoreFiles()) {
@@ -261,7 +288,7 @@ namespace edm {
     }
 
 
-    initFile(skipBadFiles());
+    initFile();
 
     if(rootFile()) {
       // make sure the new product registry is compatible with the main one
@@ -269,7 +296,7 @@ namespace edm {
                                                                    fileName(),
                                                                    BranchDescription::Permissive);
       if(!mergeInfo.empty()) {
-        throw Exception(errors::MismatchedInputFiles,"RootPrimaryFileSequence::nextFile()") << mergeInfo;
+        throw Exception(errors::MismatchedInputFiles,"QueueSource::nextFile()") << mergeInfo;
       }
     }
 
@@ -279,7 +306,7 @@ namespace edm {
   }
 
   void
-  QueueSource::initFile(bool skipBadFiles) {
+  QueueSource::initFile() {
     // If we are not duplicate checking across files and we are not using random access to find events,
     // then we can delete the IndexIntoFile for the file we are closing.
     // If we can't delete all of it, then we can delete the parts we do not need.
@@ -305,7 +332,7 @@ namespace edm {
     if(fileName().empty()) {
       // LFN not found in catalog.
       InputFile::reportSkippedFile(fileName(), logicalFileName());
-      if(!skipBadFiles) {
+      if(!skipBadFiles_) {
         throw cms::Exception("LogicalFileNameNotFound", "QueueSource::initFile()\n")
           << "Logical file name '" << logicalFileName() << "' was not found in the file catalog.\n"
           << "If you wanted a local file, you forgot the 'file:' prefix\n"
@@ -331,7 +358,7 @@ namespace edm {
       filePtr = std::make_shared<InputFile>(name.get(), "  Initiating request to open file ", InputType::Primary);
     }
     catch (cms::Exception const& e) {
-      if(!skipBadFiles) {
+      if(!skipBadFiles_) {
         if(hasFallbackUrl) {
           std::ostringstream out;
           out << e.explainSelf();
@@ -360,7 +387,7 @@ namespace edm {
         filePtr.reset(new InputFile(fallbackFullName.get(), "  Fallback request to file ", InputType::Primary));
       }
       catch (cms::Exception const& e) {
-        if(!skipBadFiles) {
+        if(!skipBadFiles_) {
           InputFile::reportSkippedFile(fileName(), logicalFileName());
           Exception ex(errors::FallbackFileOpenError, "", e);
           ex.addContext("Calling QueueSource::initFile()");
@@ -387,7 +414,7 @@ namespace edm {
       rootFile_->reportOpened("primaryFiles");
     } else {
       InputFile::reportSkippedFile(fileName(), logicalFileName());
-      if(!skipBadFiles) {
+      if(!skipBadFiles_) {
         throw Exception(errors::FileOpenError) <<
            "QueueSource::initFile(): Input file " << fileName() << " was not found or could not be opened.\n";
       }
@@ -398,26 +425,37 @@ namespace edm {
 
   InputSource::ItemType
   QueueSource::getNextItemTypeFromFile(RunNumber_t& run, LuminosityBlockNumber_t& lumi, EventNumber_t& event) {
+    //std::cout << "getNextItemTypeFromFile invoked.\n";
+/*
     if(noMoreFiles()) {
+      std::cout << "getNextItemTypeFromFile: no more files.\n";
       return InputSource::IsStop;
     }
+*/
     if (!filesProcessed) {
+      if (noMoreFiles()) return InputSource::IsStop;
       return InputSource::IsFile;
     }
     if (rootFile()) {
+      //std::cout << "getNextItemTypeFromFile will invoke rootFile.\n";
       IndexIntoFile::EntryType entryType = rootFile()->getNextItemType(run, lumi, event);
       if(entryType == IndexIntoFile::kEvent) {
+        //std::cout << "getNextItemTypeFromFile: rootFile has an event.\n";
         return InputSource::IsEvent;
       } else if(entryType == IndexIntoFile::kLumi) {
+        std::cout << "getNextItemTypeFromFile: rootFile has a lumi.\n";
         return InputSource::IsLumi;
       } else if(entryType == IndexIntoFile::kRun) {
+        std::cout << "getNextItemTypeFromFile: rootFile has a run.\n";
         return InputSource::IsRun;
       }
       assert(entryType == IndexIntoFile::kEnd);
     }
     if(atLastFile()) {
+      std::cout << "getNextItemTypeFromFile: at last file, stop!\n";
       return InputSource::IsStop;
     }
+    std::cout << "getNextItemTypeFromFile: try another file!\n";
     return InputSource::IsFile;
   }
 
