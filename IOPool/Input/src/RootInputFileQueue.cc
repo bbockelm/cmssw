@@ -3,6 +3,7 @@
 #include "RootFile.h"
 #include "RootInputFileQueue.h"
 #include "QueueSource.h"
+#include "DuplicateChecker.h"
 
 #include "DataFormats/Provenance/interface/BranchID.h"
 #include "DataFormats/Provenance/interface/IndexIntoFile.h"
@@ -11,6 +12,7 @@
 #include "FWCore/MessageLogger/interface/MessageLogger.h"
 #include "FWCore/ParameterSet/interface/ParameterSet.h"
 #include "FWCore/ParameterSet/interface/ParameterSetDescription.h"
+#include "FWCore/Sources/interface/EventSkipperByID.h"
 #include "Utilities/StorageFactory/interface/StorageFactory.h"
 
 #include "TSystem.h"
@@ -28,7 +30,11 @@ namespace edm {
     catalog_(catalog),
     //fileIter_(fileCatalogItems().begin()),
     input_(input),
-    rootFile_()
+    eventSkipperByID_(EventSkipperByID::create(pset).release()),
+    duplicateChecker_(new DuplicateChecker(pset)),
+    initialNumberOfEventsToSkip_(pset.getUntrackedParameter<unsigned int>("skipEvents")),
+    noEventSort_(pset.getUntrackedParameter<bool>("noEventSort")),
+    treeCacheSize_(noEventSort_ ? pset.getUntrackedParameter<unsigned int>("cacheSize") : 0U)
   {
   }
 
@@ -52,49 +58,6 @@ namespace edm {
   RootInputFileQueue::~RootInputFileQueue() {
   }
 
-  std::shared_ptr<RunAuxiliary>
-  RootInputFileQueue::readRunAuxiliary_() {
-    assert(rootFile());
-    return rootFile()->readRunAuxiliary_();
-  }
-
-  std::shared_ptr<LuminosityBlockAuxiliary>
-  RootInputFileQueue::readLuminosityBlockAuxiliary_() {
-    assert(rootFile());
-    return rootFile()->readLuminosityBlockAuxiliary_();
-  }
-
-  void
-  RootInputFileQueue::readRun_(RunPrincipal& runPrincipal) {
-    assert(rootFile());
-    rootFile()->readRun_(runPrincipal);
-  }
-
-  void
-  RootInputFileQueue::readLuminosityBlock_(LuminosityBlockPrincipal& lumiPrincipal) {
-    assert(rootFile());
-    rootFile()->readLuminosityBlock_(lumiPrincipal);
-  }
-
-  // readEvent() is responsible for setting up the EventPrincipal.
-  //
-  //   1. fill an EventPrincipal with a unique EventID
-  //   2. For each entry in the provenance, put in one ProductResolver,
-  //      holding the Provenance for the corresponding EDProduct.
-  //   3. set up the caches in the EventPrincipal to know about this
-  //      ProductResolver.
-  //
-  // We do *not* create the EDProduct instance (the equivalent of reading
-  // the branch containing this EDProduct. That will be done by the Delayed Reader,
-  //  when it is asked to do so.
-  //
-
-  void
-  RootInputFileQueue::readEvent(EventPrincipal& eventPrincipal) {
-    assert(rootFile());
-    rootFile()->readEvent(eventPrincipal);
-  }
-
   bool
   RootInputFileQueue::containedInCurrentFile(RunNumber_t run, LuminosityBlockNumber_t lumi, EventNumber_t event) const {
     if(!rootFile()) return false;
@@ -111,6 +74,7 @@ namespace edm {
     return found;
   }
 
+/*
   void
   RootInputFileQueue::initTheFile(bool skipBadFiles,
                                   bool deleteIndexIntoFile,
@@ -221,11 +185,6 @@ namespace edm {
     }
   }
 
-  void
-  RootInputFileQueue::endJob() {
-    closeFile_();
-  }
-
   std::unique_ptr<FileBlock>
   RootInputFileQueue::readFile_() {
     if (!filesProcessed) {
@@ -244,7 +203,8 @@ namespace edm {
     }
     return rootFile()->createFileBlock();
   }
-
+*/
+/*
   InputSource::ItemType
   RootInputFileQueue::getNextItemType(RunNumber_t& run, LuminosityBlockNumber_t& lumi, EventNumber_t& event) {
     if(noMoreFiles()) {
@@ -269,7 +229,7 @@ namespace edm {
     } 
     return InputSource::IsFile;
   }
-
+*/
   bool RootInputFileQueue::nextFile() {
     if(!noMoreFiles()) {
       // TODO: Contact remote queue and ask for a file.
@@ -307,6 +267,9 @@ namespace edm {
     desc.addUntracked<unsigned int>("cacheSize", roottree::defaultCacheSize)
         ->setComment("Size of ROOT TTree prefetch cache.  Affects performance.");
 
+    EventSkipperByID::fillDescription(desc);
+    DuplicateChecker::fillDescription(desc);
+
     // TODO: add AMQP-specific elements here.
   }
 
@@ -326,55 +289,20 @@ namespace edm {
     return true;
   }
 
-  // Currently, we only support seeking to an event in the current file.
-  bool
-  RootInputFileQueue::goToEvent(EventID const& eventID) {
-    return (rootFile() && rootFile()->goToEvent(eventID));
+
+  void
+  RootInputFileQueue::setIndexIntoFile(size_t index) {
+   indexesIntoFiles_[index] = rootFile()->indexIntoFileSharedPtr();
   }
 
   void
-  RootInputFileQueue::closeFile_() {
-    // close the currently open file, if any, and delete the RootFile object.
-    if(rootFile()) {
-      auto sentry = std::make_unique<InputSource::FileCloseSentry>(input_, lfn(), usedFallback());
-      rootFile()->close();
-      rootFile().reset();
-    } 
-  }
+  RootInputFileQueue::initFile_(bool skipBadFiles) {
+    // If we are not duplicate checking across files and we are not using random access to find events,
+    // then we can delete the IndexIntoFile for the file we are closing.
+    // If we can't delete all of it, then we can delete the parts we do not need.
+    bool deleteIndexIntoFile = !(duplicateChecker_ && duplicateChecker_->checkingAllFiles() && !duplicateChecker_->checkDisabled());
+    initTheFile(skipBadFiles, deleteIndexIntoFile, &input_, "primaryFiles", InputType::Primary);
+  }   
 
-  RootInputFileQueue::RootFileSharedPtr
-  RootInputFileQueue::makeRootFile(std::shared_ptr<InputFile> filePtr) {
-      size_t currentIndexIntoFile = sequenceNumberOfFile();
-      return std::make_shared<RootFile>(
-          fileName(),
-          input_.processConfiguration(),
-          logicalFileName(),
-          filePtr,
-          eventSkipperByID(),
-          initialNumberOfEventsToSkip_ != 0,
-          remainingEvents(),
-          remainingLuminosityBlocks(),
-          input_.nStreams(),
-          treeCacheSize_,
-          input_.treeMaxVirtualSize(),
-          input_.processingMode(),
-          input_.runHelper(),
-          noEventSort_,
-          input_.productSelectorRules(),
-          InputType::Primary,
-          input_.branchIDListHelper(),
-          input_.thinnedAssociationsHelper(),
-          nullptr, // associationsFromSecondary
-          duplicateChecker(),
-          input_.dropDescendants(),
-          input_.processHistoryRegistryForUpdate(),
-          indexesIntoFiles(),
-          currentIndexIntoFile,
-          orderedProcessHistoryIDs_,
-          input_.bypassVersionCheck(),
-          input_.labelRawDataLikeMC(),
-          false, // usingGoToEvent_
-          true); // enablePrefetching_
-  }
 }
 

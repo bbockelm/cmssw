@@ -25,8 +25,12 @@ activities are governed by a remote queue.
 namespace edm {
 
   class ConfigurationDescriptions;
+  class DuplicateChecker;
+  class EventSkipperByID;
   class FileCatalogItem;
-  class RootInputFileQueue;
+  class IndexIntoFile;
+  class InputFile;
+  class RootFile;
   class RunHelperBase;
 
   class QueueSource : public InputSource {
@@ -49,6 +53,20 @@ namespace edm {
     static void fillDescriptions(ConfigurationDescriptions& descriptions);
 
   private:
+    typedef std::shared_ptr<RootFile> RootFileSharedPtr;
+
+    std::string const& fileName() const {return fileIter_.fileName();}
+    std::string const& logicalFileName() const {return fileIter_.logicalFileName();}
+    std::string const& fallbackFileName() const {return fileIter_.fallbackFileName();}
+    std::string const& lfn() const {return lfn_;}
+    size_t lfnHash() const {return lfnHash_;}
+    bool usedFallback() const {return usedFallback_;}
+    size_t sequenceNumberOfFile() const {return filesProcessed;}
+    bool atFirstFile() const {return filesProcessed == 0;}
+    bool atLastFile() const {return gotLastFile;}
+    bool noMoreFiles() const {return gotLastFile;}
+    bool noFiles() const {return (filesProcessed == 0) && gotLastFile;}
+
     virtual void readEvent_(EventPrincipal& eventPrincipal) override;
     virtual std::shared_ptr<LuminosityBlockAuxiliary> readLuminosityBlockAuxiliary_() override;
     virtual void readLuminosityBlock_(LuminosityBlockPrincipal& lumiPrincipal) override;
@@ -58,14 +76,29 @@ namespace edm {
     virtual void closeFile_() override;
     virtual void endJob() override;
     virtual ItemType getNextItemType() override;
+    ItemType getNextItemTypeFromFile(RunNumber_t& run, LuminosityBlockNumber_t& lumi, EventNumber_t& event);
     virtual bool readIt(EventID const& id, EventPrincipal& eventPrincipal, StreamContext& streamContext) override;
     virtual void skip(int offset) override;
     virtual bool goToEvent_(EventID const& eventID) override;
     virtual void preForkReleaseResources() override;
     virtual bool randomAccess_() const override;
 
+
+    void initFile(bool skipBadFiles);
+    bool skipToItem(RunNumber_t run, LuminosityBlockNumber_t lumi, EventNumber_t event);
+    std::vector<std::shared_ptr<IndexIntoFile> > const& indexesIntoFiles() const {return indexesIntoFiles_;}
+    void setIndexIntoFile(size_t index);
+    virtual RootFileSharedPtr makeRootFile(std::shared_ptr<InputFile> filePtr);
+
+    std::shared_ptr<EventSkipperByID const> eventSkipperByID() const {return get_underlying_safe(eventSkipperByID_);}
+    std::shared_ptr<EventSkipperByID>& eventSkipperByID() {return get_underlying_safe(eventSkipperByID_);}
+    std::shared_ptr<DuplicateChecker const> duplicateChecker() const {return get_underlying_safe(duplicateChecker_);}
+    std::shared_ptr<DuplicateChecker>& duplicateChecker() {return get_underlying_safe(duplicateChecker_);}
+    std::shared_ptr<RootFile const> rootFile() const {return get_underlying_safe(rootFile_);}
+    std::shared_ptr<RootFile>& rootFile() {return get_underlying_safe(rootFile_);}
+
     std::pair<SharedResourcesAcquirer*,std::recursive_mutex*> resourceSharedWithDelayedReader_() override;
-    
+
     RootServiceChecker rootServiceChecker_;
     InputFileCatalog catalog_;
     std::array<std::vector<BranchID>, NumBranchTypes>  branchIDsToReplace_;
@@ -81,7 +114,22 @@ namespace edm {
     edm::propagate_const<std::unique_ptr<RunHelperBase>> runHelper_;
     std::unique_ptr<SharedResourcesAcquirer> resourceSharedWithDelayedReaderPtr_; // We do not use propagate_const because the acquirer is itself mutable.
     std::shared_ptr<std::recursive_mutex> mutexSharedWithDelayedReader_;
-    edm::propagate_const<std::unique_ptr<RootInputFileQueue>> primaryFileSequence_;
+
+    std::vector<ProcessHistoryID> orderedProcessHistoryIDs_;
+    edm::propagate_const<std::shared_ptr<EventSkipperByID>> eventSkipperByID_;
+    edm::propagate_const<std::shared_ptr<DuplicateChecker>> duplicateChecker_;
+    int initialNumberOfEventsToSkip_;
+    bool noEventSort_;
+    unsigned int treeCacheSize_;
+
+    std::string lfn_{"unknown"};
+    size_t lfnHash_{0U};
+    bool usedFallback_{false};
+    FileCatalogItem fileIter_;
+    bool gotLastFile {false};
+    size_t filesProcessed {0};
+    edm::propagate_const<RootFileSharedPtr> rootFile_;
+    std::vector<std::shared_ptr<IndexIntoFile> > indexesIntoFiles_;
   }; // class QueueSource
 }
 #endif
