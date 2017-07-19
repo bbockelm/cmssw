@@ -31,9 +31,9 @@ namespace edm {
     void setupConsumeQueue();
 
     std::string hostname_;
+    static const uint32_t port_{5672};
+    const uint32_t timeout_sec_{2};
     std::string queue_;
-    std::vector<std::string> filenames_;
-    std::vector<std::string>::const_iterator iter_;
 
     // Opaque structure only defined in AMQPQueue.cc; meant to keep amqp-specific headers
     // from leaking out to other compilation units.

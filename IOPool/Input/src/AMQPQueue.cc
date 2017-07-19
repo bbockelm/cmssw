@@ -1,6 +1,8 @@
 
 #include "AMQPQueue.h"
 
+#include <iostream>
+
 #include "amqp_tcp_socket.h"
 #include <amqp.h>
 #include <amqp_framing.h>
@@ -103,9 +105,8 @@ namespace edm {
 
   AMQPQueue::AMQPQueue(ParameterSet const& pset) :
     hostname_(pset.getUntrackedParameter<std::string>("hostname")),
+    timeout_sec_(pset.getUntrackedParameter<unsigned>("timeout")),
     queue_(pset.getUntrackedParameter<std::string>("queue")),
-    filenames_(pset.getUntrackedParameter<std::vector<std::string>>("fileNames")),
-    iter_(filenames_.begin()),
     state_(new internal::AMQPState())
   {
     setupConnection();
@@ -122,16 +123,15 @@ namespace edm {
     amqp_envelope_t envelope;
     amqp_frame_t frame;
 
-    // amqp_maybe_release_buffers(conn);  ?
-    ret = amqp_consume_message(state_->conn_, &envelope, nullptr, 0);
+    struct timeval timeout{.tv_sec = timeout_sec_, .tv_usec = 0};
 
-    if (AMQP_RESPONSE_NORMAL != ret.reply_type) {
-      if (AMQP_RESPONSE_LIBRARY_EXCEPTION == ret.reply_type &&
-          AMQP_STATUS_UNEXPECTED_STATE == ret.library_error) {
+    amqp_maybe_release_buffers(state_->conn_);
+    ret = amqp_consume_message(state_->conn_, &envelope, &timeout, 0);
 
+    if (AMQP_RESPONSE_LIBRARY_EXCEPTION == ret.reply_type) {
+      if (AMQP_STATUS_UNEXPECTED_STATE == ret.library_error) {
 
         if (AMQP_STATUS_OK != amqp_simple_wait_frame(state_->conn_, &frame)) {
-        // TODO: do something?  Throw an exception?
           edm::Exception ex(edm::errors::OtherCMS);
           ex << "Failed to wait on the next frame.";
           ex.addContext("AMQPQueue::next()");
@@ -164,19 +164,28 @@ namespace edm {
           ex.addContext("AMQPQueue::next()");
           throw ex;
         }
+      } else if (AMQP_STATUS_TIMEOUT == ret.library_error) {
+        // Nothing left for this process to do: time to shut down cleanly.
+        std::cout << "Timeout occurred waiting for more files to process.  Shutting down.\n";
+        return false;
+      } else {
+        throwAMQPError(ret, "AMQPQueue::next()", "Response from broker.");
       }
-    } else {  // ret.reply_type == AMQP_RESPONSE_NORMAL
-      // TODO: process envelope.
-      amqp_destroy_envelope(&envelope);
-      edm::Exception ex(edm::errors::UnimplementedFeature);
-      ex << "Not implemented error.";
-      ex.addContext("AMQPQueue::next()");
-      throw ex;
-    }
+    } else if (ret.reply_type == AMQP_RESPONSE_NORMAL) {
+      std::cout << "Parse envelope from broker.\n";
 
-    if (iter_ == filenames_.end()) {return false;}
-    name = *iter_;
-    iter_++;
+      std::string exchange((char*)envelope.exchange.bytes, envelope.exchange.len);
+      std::string routing_key((char*)envelope.routing_key.bytes, envelope.routing_key.len);
+      std::cout << "Delivery " << envelope.delivery_tag << ", exchange "
+        << exchange << ", routing key " << routing_key << "\n";
+      // TODO: process / check the Content-type header?
+      std::string message((char*)envelope.message.body.bytes, envelope.message.body.len);
+
+      amqp_destroy_envelope(&envelope);
+      name = message;
+    } else {
+      throwAMQPError(ret, "AMQPQueue::next()", "Retrieving file to process.");
+    }
     return true;
   }
 
@@ -187,8 +196,8 @@ namespace edm {
       ->setComment("Contact hostname for message broker.");
     desc.addUntracked<std::string>("queue")
       ->setComment("Remote queue for subscription.");
-    desc.addUntracked<std::vector<std::string>>("fileNames")
-      ->setComment("(Stub) additional filenames to process.");
+    desc.addUntracked<unsigned>("timeout", 2)
+      ->setComment("Timeout to wait for new files, in seconds.");
   }
 
   void
@@ -234,8 +243,13 @@ namespace edm {
 
     // TODO: should `r` here be free'd afterward?
     {
-      amqp_queue_declare_ok_t *r = amqp_queue_declare(state_->conn_, 1, amqp_empty_bytes, 0, 0, 0, 1,
-                                   amqp_empty_table);
+      amqp_queue_declare_ok_t *r = amqp_queue_declare(state_->conn_, 1,
+          amqp_cstring_bytes(queue_.c_str()),
+          0, // passive
+          0, // durable
+          0, // exclusive
+          0, // auto_delete
+          amqp_empty_table);
       state_->throwOnRPCError("AMQPQueue::setupChannel()", "Failed to declare queue to AMQP broker.");
 
       amqp_bytes_t queuename = amqp_bytes_malloc_dup(r->queue);
@@ -257,8 +271,13 @@ namespace edm {
   void
   AMQPQueue::setupConsumeQueue()
   {
-    amqp_basic_consume(state_->conn_, 1, state_->queuename_, amqp_empty_bytes, 0, 1, 0,
-                       amqp_empty_table);
+    amqp_basic_consume(state_->conn_, 1,
+                       state_->queuename_,
+                       amqp_empty_bytes, // consumer_tag
+                       0, // no_local
+                       0, // no_ack
+                       0, // exclusive
+                       amqp_empty_table); // arguments
     state_->throwOnRPCError("AMQPQueue::setupChannel()", "Failed to setup basic consume.");
   }
 

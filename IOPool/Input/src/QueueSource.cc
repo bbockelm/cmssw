@@ -1,6 +1,5 @@
 /*----------------------------------------------------------------------
 ----------------------------------------------------------------------*/
-#include <iostream>
 
 #include "AMQPQueue.h"
 #include "QueueSource.h"
@@ -425,37 +424,24 @@ namespace edm {
 
   InputSource::ItemType
   QueueSource::getNextItemTypeFromFile(RunNumber_t& run, LuminosityBlockNumber_t& lumi, EventNumber_t& event) {
-    //std::cout << "getNextItemTypeFromFile invoked.\n";
-/*
-    if(noMoreFiles()) {
-      std::cout << "getNextItemTypeFromFile: no more files.\n";
-      return InputSource::IsStop;
-    }
-*/
     if (!filesProcessed) {
       if (noMoreFiles()) return InputSource::IsStop;
       return InputSource::IsFile;
     }
     if (rootFile()) {
-      //std::cout << "getNextItemTypeFromFile will invoke rootFile.\n";
       IndexIntoFile::EntryType entryType = rootFile()->getNextItemType(run, lumi, event);
       if(entryType == IndexIntoFile::kEvent) {
-        //std::cout << "getNextItemTypeFromFile: rootFile has an event.\n";
         return InputSource::IsEvent;
       } else if(entryType == IndexIntoFile::kLumi) {
-        std::cout << "getNextItemTypeFromFile: rootFile has a lumi.\n";
         return InputSource::IsLumi;
       } else if(entryType == IndexIntoFile::kRun) {
-        std::cout << "getNextItemTypeFromFile: rootFile has a run.\n";
         return InputSource::IsRun;
       }
       assert(entryType == IndexIntoFile::kEnd);
     }
     if(atLastFile()) {
-      std::cout << "getNextItemTypeFromFile: at last file, stop!\n";
       return InputSource::IsStop;
     }
-    std::cout << "getNextItemTypeFromFile: try another file!\n";
     return InputSource::IsFile;
   }
 
