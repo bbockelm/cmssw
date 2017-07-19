@@ -26,6 +26,7 @@
 #include "FWCore/MessageLogger/interface/MessageLogger.h"
 #include "FWCore/ParameterSet/interface/ConfigurationDescriptions.h"
 #include "FWCore/ParameterSet/interface/ParameterSetDescription.h"
+#include "FWCore/ServiceRegistry/interface/ActivityRegistry.h"
 #include "FWCore/Sources/interface/EventSkipperByID.h"
 #include "FWCore/Utilities/interface/EDMException.h"
 #include "FWCore/Utilities/interface/Exception.h"
@@ -67,23 +68,42 @@ namespace edm {
 
     // Open first file.
     std::string nextCatalogItem;
+    bool gotLastFile = true;
     while (!(gotLastFile = !fileQueue_->next(nextCatalogItem))) {
       indexesIntoFiles_.emplace_back(nullptr);
       std::vector<std::string> filenames = {nextCatalogItem};
       InputFileCatalog catalog(filenames, overrideCatalogLocation_);
       fileCatalogItem_ = catalog.fileCatalogItems()[0];
+      fileSequenceNum++;
       initFile();
-      filesProcessed++;
       if (rootFile()) {
+        gotLastFile = false;
         break;
       }
     }
-    if (!gotLastFile) {
+    // fileSequenceNum will point to:
+    // * -1 if there were no files available in the queue.
+    // *  0 if the first file returned by queue was usable.
+    // *  1 if the second file was usable, the first one was unusable, and skipBadFiles is on.
+    // *  2 ... and so on.
+    if (gotLastFile) {
+      lastFileSequenceNum = fileSequenceNum;
+    } else {
       productRegistryUpdate().updateFromInput(rootFile()->productRegistry()->productList());
       if (initialNumberOfEventsToSkip_ != 0) {
         skipEvents(initialNumberOfEventsToSkip_);
       }
     }
+
+    std::shared_ptr<ActivityRegistry> ar = actReg();
+    if (!ar) {
+      edm::Exception ex(edm::errors::OtherCMS);
+      ex << "Activity registry unavailable when queue source was constructed.";
+      ex.addContext("QueueSource::QueueSource()");
+      throw ex;
+    }
+    ar->watchJobFailure(this, &QueueSource::jobFailure);
+    ar->watchPostEndJob(this, &QueueSource::jobSuccess);
   }
 
   QueueSource::~QueueSource() {}
@@ -96,9 +116,12 @@ namespace edm {
 
   std::unique_ptr<FileBlock>
   QueueSource::readFile_() {
-    // TODO: it's possible that the nextFile call discovers we have
-    // no files remaining.
-    nextFile();
+    // First file is a special case as the constructor setup the file.
+    // Afterward, each time the event processor wants to read a file, we should
+    // move the iterator forward and return the result.
+    if (readFileInvokedOnce_) nextFile();
+    readFileInvokedOnce_ = true;
+
     if(!rootFile()) {
       return std::make_unique<FileBlock>();
     }
@@ -109,6 +132,7 @@ namespace edm {
     auto &file = rootFile();
     if(file) {
       auto sentry = std::make_unique<InputSource::FileCloseSentry>(*this, lfn(), usedFallback());
+      filesToAck_.push_back(lfn());
       file->close();
       file.reset();
     }
@@ -272,9 +296,14 @@ namespace edm {
 
   bool QueueSource::nextFile() {
     if (!noMoreFiles()) {
+      fileSequenceNum++;
       std::string nextCatalogItem;
       if (!fileQueue_->next(nextCatalogItem)) {
-        gotLastFile = true;
+        // The prior sequence number was actually the last one!
+        // fileSequenceNum should now point past the lastFileSequenceNum, and
+        // noMoreFiles() should return true.
+        lastFileSequenceNum = fileSequenceNum-1;
+        closeFile_();  // Invalidate the current file handle as we are past the end.
       } else {
         std::vector<std::string> filenames = {nextCatalogItem};
         InputFileCatalog catalog(filenames, overrideCatalogLocation_);
@@ -282,15 +311,17 @@ namespace edm {
         indexesIntoFiles_.emplace_back(nullptr);
       }
     }
+    // This isn't an `else` for the above conditional as the logic above may have changed
+    // the return value of this function.
     if (noMoreFiles()) {
       return false;
     }
 
-
     initFile();
 
+    // make sure the new product registry is compatible with the main one.
+    // This is not done in initFile to allow the constructor to special-case the first file.
     if(rootFile()) {
-      // make sure the new product registry is compatible with the main one
       std::string mergeInfo = productRegistryUpdate().merge(*rootFile()->productRegistry(),
                                                                    fileName(),
                                                                    BranchDescription::Permissive);
@@ -298,8 +329,6 @@ namespace edm {
         throw Exception(errors::MismatchedInputFiles,"QueueSource::nextFile()") << mergeInfo;
       }
     }
-
-    filesProcessed++;
 
     return true;
   }
@@ -311,15 +340,16 @@ namespace edm {
     // If we can't delete all of it, then we can delete the parts we do not need.
     bool deleteIndexIntoFile = !(duplicateChecker_ && duplicateChecker_->checkingAllFiles() && !duplicateChecker_->checkDisabled());
 
-    // We are really going to close the open file.
-    if(!noMoreFiles()) {
+    // We are going to close the open file; delete the old index if it isn't needed.
+    if(!noMoreFiles() && (fileSequenceNum > 0)) {
       if(deleteIndexIntoFile) {
-        indexesIntoFiles_[filesProcessed].reset();
-      } else {
-        if(indexesIntoFiles_[filesProcessed]) indexesIntoFiles_[filesProcessed]->inputFileClosed();
+        indexesIntoFiles_[fileSequenceNum-1].reset();
+      } else if(indexesIntoFiles_[fileSequenceNum-1]) {
+        indexesIntoFiles_[fileSequenceNum-1]->inputFileClosed();
       }
     }
 
+    // Perform the close of the current file.
     closeFile_();
 
     if(noMoreFiles()) {
@@ -424,10 +454,11 @@ namespace edm {
 
   InputSource::ItemType
   QueueSource::getNextItemTypeFromFile(RunNumber_t& run, LuminosityBlockNumber_t& lumi, EventNumber_t& event) {
-    if (!filesProcessed) {
-      if (noMoreFiles()) return InputSource::IsStop;
-      return InputSource::IsFile;
-    }
+    // The constructor should make sure we are pointing at a valid file (if possible) before
+    // the event processor invokes this function.
+    if (noMoreFiles()) return InputSource::IsStop;
+
+    // If we have a valid file with entries to process, return one of those.
     if (rootFile()) {
       IndexIntoFile::EntryType entryType = rootFile()->getNextItemType(run, lumi, event);
       if(entryType == IndexIntoFile::kEvent) {
@@ -438,10 +469,16 @@ namespace edm {
         return InputSource::IsRun;
       }
       assert(entryType == IndexIntoFile::kEnd);
+      // At this point, the current file is out of entries to process.
+      if(atLastFile()) {
+        return InputSource::IsStop;
+      }
     }
-    if(atLastFile()) {
-      return InputSource::IsStop;
-    }
+      // The `else` case above is where the current file is not valid but we haven't
+      // hit the end-of-queue.
+      // Perhaps skipBadFiles is set and the last readFile_ failed to produce a valid file.
+      // In that case, we do the same thing as if the prior file ran out of events: return
+      // a new file!
     return InputSource::IsFile;
   }
 
@@ -453,6 +490,24 @@ namespace edm {
     // As with RootInputFileSequence, we could maintain a hashmap of previously-read files and search
     // those files; doesn't seem like it is necessary in this case?
     return found;
+  }
+
+  void
+  QueueSource::jobSuccess() {
+    printf("Processing job success.\n");
+    for (auto const&file : filesToAck_) {
+      fileQueue_->ack(file);
+    }
+    filesToAck_.clear();
+  }
+
+  void
+  QueueSource::jobFailure() {
+    printf("Processing job failure.\n");
+    for (auto const&file : filesToAck_) {
+      fileQueue_->nack(file);
+    }
+    filesToAck_.clear();
   }
 
 }

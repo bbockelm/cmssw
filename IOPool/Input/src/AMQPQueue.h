@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <map>
 
 #include "FileQueue.h"
 
@@ -23,6 +24,9 @@ namespace edm {
 
     virtual bool next(std::string &filename) override;
 
+    virtual void ack(std::string const& filename) override;
+    virtual void nack(std::string const& filename) override;
+
     static void fillDescription(ParameterSetDescription& descriptions);
 
   private:
@@ -34,6 +38,9 @@ namespace edm {
     static const uint32_t port_{5672};
     const uint32_t timeout_sec_{2};
     std::string queue_;
+
+    // A map of all the pending ACKs, keyed on the filename.
+    std::multimap<std::string, uint64_t> fileToTag_;
 
     // Opaque structure only defined in AMQPQueue.cc; meant to keep amqp-specific headers
     // from leaking out to other compilation units.

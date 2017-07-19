@@ -61,11 +61,11 @@ namespace edm {
     std::string const& lfn() const {return lfn_;}
     size_t lfnHash() const {return lfnHash_;}
     bool usedFallback() const {return usedFallback_;}
-    size_t sequenceNumberOfFile() const {return filesProcessed;}
-    bool atFirstFile() const {return filesProcessed == 0;}
-    bool atLastFile() const {return gotLastFile;}
-    bool noMoreFiles() const {return gotLastFile;}
-    bool noFiles() const {return (filesProcessed == 0) && gotLastFile;}
+    size_t sequenceNumberOfFile() const {assert(fileSequenceNum >= 0); return fileSequenceNum;}
+    bool atFirstFile() const {return fileSequenceNum == 0;}
+    bool atLastFile() const {return (lastFileSequenceNum >= 0) && (fileSequenceNum == lastFileSequenceNum) ;}
+    bool noMoreFiles() const {return (lastFileSequenceNum == -1) || ((lastFileSequenceNum != -2) && (fileSequenceNum > lastFileSequenceNum));}
+    bool noFiles() const {return lastFileSequenceNum == -1;}
 
     virtual void readEvent_(EventPrincipal& eventPrincipal) override;
     virtual std::shared_ptr<LuminosityBlockAuxiliary> readLuminosityBlockAuxiliary_() override;
@@ -83,6 +83,8 @@ namespace edm {
     virtual void preForkReleaseResources() override;
     virtual bool randomAccess_() const override;
 
+    void jobSuccess();
+    void jobFailure();
 
     void initFile();
     bool skipToItem(RunNumber_t run, LuminosityBlockNumber_t lumi, EventNumber_t event);
@@ -126,11 +128,19 @@ namespace edm {
     std::string lfn_{"unknown"};
     size_t lfnHash_{0U};
     bool usedFallback_{false};
+    bool readFileInvokedOnce_{false};
     FileCatalogItem fileCatalogItem_;
-    bool gotLastFile {false};
-    size_t filesProcessed {0};
+    // lastFileSequenceNum is the sequence number of the last file to process.
+    // If we haven't been told what the last number is yet, then we keep this set to -2.
+    // The special value of -1 indicates there are no files to process.
+    ssize_t lastFileSequenceNum {-2};
+    ssize_t fileSequenceNum {-1};
     edm::propagate_const<RootFileSharedPtr> rootFile_;
     std::vector<std::shared_ptr<IndexIntoFile> > indexesIntoFiles_;
+
+    // A list of files that are pending acknowledgement.  These should trigger an ack
+    // to the remote queue when the source stops (or an output file is safely staged out).
+    std::vector<std::string> filesToAck_;
 
     std::unique_ptr<FileQueue> fileQueue_;
   }; // class QueueSource

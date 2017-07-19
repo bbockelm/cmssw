@@ -80,6 +80,7 @@ namespace edm {
             amqp_connection_close(conn_, AMQP_REPLY_SUCCESS);  // TODO: check error code.
           }
           amqp_destroy_connection(conn_);  // TODO: check error code.
+          conn_ = nullptr;
         }
         if (queuename_.bytes) amqp_bytes_free(queuename_);
       }
@@ -172,14 +173,15 @@ namespace edm {
         throwAMQPError(ret, "AMQPQueue::next()", "Response from broker.");
       }
     } else if (ret.reply_type == AMQP_RESPONSE_NORMAL) {
-      std::cout << "Parse envelope from broker.\n";
 
       std::string exchange((char*)envelope.exchange.bytes, envelope.exchange.len);
       std::string routing_key((char*)envelope.routing_key.bytes, envelope.routing_key.len);
-      std::cout << "Delivery " << envelope.delivery_tag << ", exchange "
-        << exchange << ", routing key " << routing_key << "\n";
+      //std::cout << "Delivery " << envelope.delivery_tag << ", exchange "
+      //  << exchange << ", routing key " << routing_key << "\n";
       // TODO: process / check the Content-type header?
       std::string message((char*)envelope.message.body.bytes, envelope.message.body.len);
+      std::cout << "AMQP host returned file to process: " << message << std::endl;
+      fileToTag_.emplace(message, envelope.delivery_tag);
 
       amqp_destroy_envelope(&envelope);
       name = message;
@@ -279,6 +281,64 @@ namespace edm {
                        0, // exclusive
                        amqp_empty_table); // arguments
     state_->throwOnRPCError("AMQPQueue::setupChannel()", "Failed to setup basic consume.");
+  }
+
+  void
+  AMQPQueue::ack(std::string const&filename)
+  {
+    auto dtag = fileToTag_.find(filename);
+    if (dtag == fileToTag_.end()) {
+      edm::Exception ex(edm::errors::OtherCMS);
+      ex << "Asked to acknowledge an unknown filename: " << filename;
+      ex.addContext("Calling AMQPQueue::ack()");
+      throw ex;
+    }
+    if (state_->conn_ == nullptr) {
+      edm::Exception ex(edm::errors::OtherCMS);
+      ex << "AMQP used with invalid connection.";
+      ex.addContext("Calling AMQPQueue::nack()");
+      throw ex;
+    }
+    int res = amqp_basic_ack(state_->conn_, 1, dtag->second, 0);
+    if (res != AMQP_STATUS_OK) {
+      edm::Exception ex(edm::errors::OtherCMS);
+      ex << "Failure when acknowledging file: " << filename;
+      std::stringstream ss; ss << "AMQP error: " << amqp_error_string2(res);
+      ex.addAdditionalInfo(ss.str());
+      ex.addContext("Calling AMQPQueue::ack()");
+      throw ex;
+    }
+    std::cout << "Gave a ACK for file " << filename << std::endl;
+    fileToTag_.erase(dtag);
+  }
+
+  void
+  AMQPQueue::nack(std::string const&filename)
+  {
+    auto dtag = fileToTag_.find(filename);
+    if (dtag == fileToTag_.end()) {
+      edm::Exception ex(edm::errors::OtherCMS);
+      ex << "Asked to return an unknown filename: " << filename;
+      ex.addContext("Calling AMQPQueue::nack()");
+      throw ex;
+    }
+    if (state_->conn_ == nullptr) {
+      edm::Exception ex(edm::errors::OtherCMS);
+      ex << "AMQP used with invalid connection.";
+      ex.addContext("Calling AMQPQueue::nack()");
+      throw ex;
+    }
+    int res = amqp_basic_nack(state_->conn_, 1, dtag->second, 0, 1);
+    if (res != AMQP_STATUS_OK) {
+      edm::Exception ex(edm::errors::OtherCMS);
+      ex << "Failure when returning file: " << filename;
+      std::stringstream ss; ss << "AMQP error: " << amqp_error_string2(res);
+      ex.addAdditionalInfo(ss.str());
+      ex.addContext("Calling AMQPQueue::nack()");
+      throw ex;
+    }
+    std::cout << "Gave a NACK for file " << filename << std::endl;
+    fileToTag_.erase(dtag);
   }
 
 }

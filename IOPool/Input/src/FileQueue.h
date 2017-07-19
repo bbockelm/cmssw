@@ -28,6 +28,16 @@ namespace edm {
     //     the remote queue.
     virtual bool next(std::string &name) = 0;
 
+    // Acknowledges a file has been completely processed.
+    // - `name`: File name, as provided by `next()`, that has been
+    //   successfully processed.
+    // - Should throw an exception if an error occurs when ACK'ing to
+    //   the remote queue.
+    virtual void ack(std::string const& name) = 0;
+
+    // Note file processing failure; conventions the same as an ACK.
+    virtual void nack(std::string const& name) = 0;
+
   protected:
     FileQueue() {}
   };
